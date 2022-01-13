@@ -18,6 +18,21 @@ func main() {
 
 type Conn struct {
 	conn net.Conn
+	recv chan []byte
+	send chan []byte
+}
+
+func (conn *Conn) WriteMessage(data []byte) error {
+	conn.send <- data
+	return nil
+}
+
+func (conn *Conn) ReadMessage() ([]byte, error) {
+	res, ok := <-conn.recv
+	if !ok {
+		return nil, io.EOF
+	}
+	return res, nil
 }
 
 func Dial(address string) (Conn, error) {
