@@ -10,29 +10,34 @@ import (
 )
 
 func main() {
-	_, err := Dial("127.0.0.1:8000")
+	conn, err := Dial("127.0.0.1:8000")
 	if err != nil {
 		panic(err)
 	}
+	conn.WriteMessage([]byte("xxx"))
+	select {}
 }
 
 type Conn struct {
 	conn net.Conn
-	recv chan []byte
-	send chan []byte
 }
 
-func (conn *Conn) WriteMessage(data []byte) error {
-	conn.send <- data
-	return nil
-}
-
-func (conn *Conn) ReadMessage() ([]byte, error) {
-	res, ok := <-conn.recv
-	if !ok {
-		return nil, io.EOF
+func (conn Conn) WriteMessage(data []byte) {
+	if len(data) >= 125 {
+		return
 	}
-	return res, nil
+	// TODO
+	// maskkey := []byte{byte(0xAB), byte(0xCD)}
+	length := len(data)
+	// payload := make([]byte, len(data))
+	// for i := range data {
+	// 	payload[i] = data[i] ^ maskkey[i%4]
+	// }
+	bw := bufio.NewWriter(conn.conn)
+	bw.WriteByte(0x81)
+	bw.WriteByte(byte(0x00) | byte(length))
+	bw.Write(data)
+	bw.Flush()
 }
 
 func Dial(address string) (Conn, error) {
@@ -54,8 +59,8 @@ func Dial(address string) (Conn, error) {
 	if err != nil {
 		return Conn{}, err
 	}
-	br := bufio.NewReader(conn)
-	x, _, err := br.ReadLine()
+	var x = make([]byte, 256)
+	conn.Read(x)
 	if err != nil {
 		return Conn{}, err
 	}
