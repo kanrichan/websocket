@@ -4,9 +4,19 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"strings"
+)
+
+var (
+	TextMessage   byte = 0x01
+	BinaryMessage byte = 0x02
+	CloseMessage  byte = 0x08
+	PingMessage   byte = 0x09
+	PongMessage   byte = 0x0a
 )
 
 func main() {
@@ -14,30 +24,49 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	conn.WriteMessage([]byte("xxx"))
-	select {}
+	conn.WriteFrame(TextMessage, []byte(strings.Repeat("01231456789", 1)))
+	conn.Close()
 }
 
 type Conn struct {
-	conn net.Conn
+	Conn net.Conn
 }
 
-func (conn Conn) WriteMessage(data []byte) {
-	if len(data) >= 125 {
-		return
+func (conn Conn) WriteFrame(opcode byte, data []byte) error {
+	bw := bufio.NewWriter(conn.Conn)
+	bw.WriteByte(0x80 | opcode) // 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
+	if opcode == PingMessage {
+		bw.WriteByte(0x00)
+		return bw.Flush()
+	}
+	var mask byte = 0x80
+	var length = len(data)
+	switch {
+	case length < 125:
+		bw.WriteByte(mask | byte(length))
+	case length < 65536:
+		bw.WriteByte(mask | 0b01111110)
+		var extended = make([]byte, 2)
+		binary.BigEndian.PutUint16(extended, uint16(length))
+		bw.Write(extended)
+	default:
+		bw.WriteByte(mask | 0b01111111)
+		var extended = make([]byte, 8)
+		binary.BigEndian.PutUint64(extended, uint64(length))
+		bw.Write(extended)
 	}
 	// TODO
-	// maskkey := []byte{byte(0xAB), byte(0xCD)}
-	length := len(data)
-	// payload := make([]byte, len(data))
-	// for i := range data {
-	// 	payload[i] = data[i] ^ maskkey[i%4]
-	// }
-	bw := bufio.NewWriter(conn.conn)
-	bw.WriteByte(0x81)
-	bw.WriteByte(byte(0x00) | byte(length))
-	bw.Write(data)
-	bw.Flush()
+	var maskkey, err = genMaskKey()
+	if err != nil {
+		return err
+	}
+	bw.Write(maskkey)
+	payload := make([]byte, len(data))
+	for i := range data {
+		payload[i] = data[i] ^ maskkey[i%4]
+	}
+	bw.Write(payload)
+	return bw.Flush()
 }
 
 func Dial(address string) (Conn, error) {
@@ -69,7 +98,8 @@ func Dial(address string) (Conn, error) {
 }
 
 func (conn *Conn) Close() error {
-	return conn.conn.Close()
+	conn.WriteFrame(CloseMessage, []byte{0x03, 0xe8})
+	return conn.Conn.Close()
 }
 
 func gennonce() (string, error) {
@@ -78,4 +108,10 @@ func gennonce() (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(p), nil
+}
+
+func genMaskKey() ([]byte, error) {
+	p := make([]byte, 4)
+	_, err := io.ReadFull(rand.Reader, p)
+	return p, err
 }
