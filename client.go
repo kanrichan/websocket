@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 )
 
@@ -20,7 +22,7 @@ var (
 )
 
 func main() {
-	conn, err := Dial("127.0.0.1:8000")
+	conn, err := Dial("ws://127.0.0.1:8000/ws/")
 	if err != nil {
 		panic(err)
 	}
@@ -69,12 +71,25 @@ func (conn Conn) WriteFrame(opcode byte, data []byte) error {
 	return bw.Flush()
 }
 
-func Dial(address string) (Conn, error) {
-	conn, err := net.Dial("tcp", address)
+func Dial(address string) (*Conn, error) {
+	uri, err := url.Parse(address)
 	if err != nil {
-		return Conn{}, err
+		return nil, err
 	}
-	nonce, err := gennonce()
+	var conn net.Conn
+	switch uri.Scheme {
+	case "ws":
+		conn, err = net.Dial("tcp", uri.Host)
+	case "wss":
+		conn, err = tls.Dial("tcp", uri.Host, nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := genNonce()
+	if err != nil {
+		return nil, err
+	}
 	bw := bufio.NewWriter(conn)
 	bw.WriteString("GET / HTTP/1.1\r\n")
 	bw.WriteString("Host: 127.0.0.1:8000\r\n")
@@ -86,15 +101,15 @@ func Dial(address string) (Conn, error) {
 	bw.WriteString("\r\n")
 	err = bw.Flush()
 	if err != nil {
-		return Conn{}, err
+		return nil, err
 	}
 	var x = make([]byte, 256)
 	conn.Read(x)
 	if err != nil {
-		return Conn{}, err
+		return nil, err
 	}
 	fmt.Println(string(x))
-	return Conn{conn}, nil
+	return &Conn{conn}, nil
 }
 
 func (conn *Conn) Close() error {
@@ -102,7 +117,7 @@ func (conn *Conn) Close() error {
 	return conn.Conn.Close()
 }
 
-func gennonce() (string, error) {
+func genNonce() (string, error) {
 	p := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, p); err != nil {
 		return "", err
