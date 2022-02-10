@@ -14,10 +14,11 @@ import (
 )
 
 func main() {
-	ws, err := NewClient("ws://127.0.0.1:8000/ws/")
+	ws, err := NewClient("wss://127.0.0.1:8000/ws")
 	if err != nil {
 		panic(err)
 	}
+	ws.Config = &tls.Config{InsecureSkipVerify: true}
 	err = ws.Connect()
 	if err != nil {
 		panic(err)
@@ -28,8 +29,11 @@ func main() {
 }
 
 type Client struct {
-	URL    *url.URL
+	URL *url.URL
+
 	Header http.Header
+	Dialer *net.Dialer
+	Config *tls.Config
 
 	Response *http.Response
 
@@ -60,11 +64,14 @@ func NewClient(url string) (*Client, error) {
 
 func (cli *Client) Connect() error {
 	var err error
+	if cli.Dialer == nil {
+		cli.Dialer = &net.Dialer{}
+	}
 	switch cli.URL.Scheme {
 	case "ws":
-		cli.Conn, err = net.Dial("tcp", cli.URL.Host)
+		cli.Conn, err = cli.Dialer.Dial("tcp", cli.URL.Host)
 	case "wss":
-		cli.Conn, err = tls.Dial("tcp", cli.URL.Host, nil)
+		cli.Conn, err = tls.DialWithDialer(cli.Dialer, "tcp", cli.URL.Host, cli.Config)
 	}
 	if err != nil {
 		return err
