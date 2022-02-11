@@ -9,17 +9,6 @@ import (
 	"strings"
 )
 
-func main() {
-	server, err := NewServer("127.0.0.1:8000")
-	if err != nil {
-		panic(err)
-	}
-	err = server.Listen()
-	if err != nil {
-		panic(err)
-	}
-}
-
 type Server struct {
 	Address  string
 	Listener net.Listener
@@ -81,7 +70,7 @@ func (srv *Server) Listen() error {
 		bw.WriteString("Upgrade: websocket\r\n")
 		bw.WriteString("Connection: Upgrade\r\n")
 		bw.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n")
-		return bw.Flush()
+		bw.Flush()
 		conn.Close()
 	}
 }

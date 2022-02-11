@@ -5,28 +5,12 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	urlpkg "net/url"
 	"strings"
 )
-
-func main() {
-	ws, err := NewClient("wss://127.0.0.1:8000/ws")
-	if err != nil {
-		panic(err)
-	}
-	ws.Config = &tls.Config{InsecureSkipVerify: true}
-	err = ws.Connect()
-	if err != nil {
-		panic(err)
-	}
-	defer ws.Close()
-	fmt.Println(ws.Response)
-	ws.WriteFrame(TextMessage, []byte("hello world!"))
-}
 
 type Client struct {
 	URL *url.URL
