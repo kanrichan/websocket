@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/binary"
 	"errors"
 	"net"
 	"net/http"
@@ -60,82 +59,56 @@ func (cli *Client) Connect() error {
 	if err != nil {
 		return err
 	}
-	err = func() error {
-		var err error
-		bw := bufio.NewWriter(cli.Conn)
-		bw.WriteString("GET " + cli.URL.Path + " HTTP/1.1\r\n")
-		cli.Header.Write(bw)
 
-		bw.WriteString("\r\n")
-		err = bw.Flush()
-		if err != nil {
-			return err
-		}
-		br := bufio.NewReader(cli.Conn)
-		cli.Response, err = http.ReadResponse(br, &http.Request{Method: "GET"})
-		if err != nil {
-			return err
-		}
-		if cli.Response.StatusCode != 101 {
-			return errors.New("bad status")
-		}
-		if strings.ToLower(cli.Response.Header.Get("Connection")) != "upgrade" ||
-			strings.ToLower(cli.Response.Header.Get("Upgrade")) != "websocket" {
-			return errors.New("bad upgrade")
-		}
-		nonceAccept, err := genNonceAccept(cli.Header.Get("Sec-WebSocket-Key"))
-		if err != nil {
-			return err
-		}
-		if cli.Response.Header.Get("Sec-Websocket-Accept") != string(nonceAccept) {
-			return errors.New("mismatch challenge/response")
-		}
-		return nil
-	}()
+	bw := bufio.NewWriter(cli.Conn)
+	bw.WriteString("GET " + cli.URL.Path + " HTTP/1.1\r\n")
+	cli.Header.Write(bw)
+
+	bw.WriteString("\r\n")
+	err = bw.Flush()
 	if err != nil {
-		cli.Conn.Close()
+		cli.Close()
 		return err
+	}
+	br := bufio.NewReader(cli.Conn)
+	cli.Response, err = http.ReadResponse(br, &http.Request{Method: "GET"})
+	if err != nil {
+		cli.Close()
+		return err
+	}
+	if cli.Response.StatusCode != 101 {
+		cli.Close()
+		return errors.New("bad status")
+	}
+	if strings.ToLower(cli.Response.Header.Get("Connection")) != "upgrade" ||
+		strings.ToLower(cli.Response.Header.Get("Upgrade")) != "websocket" {
+		cli.Close()
+		return errors.New("bad upgrade")
+	}
+	nonceAccept, err := genNonceAccept(cli.Header.Get("Sec-WebSocket-Key"))
+	if err != nil {
+		cli.Close()
+		return err
+	}
+	if cli.Response.Header.Get("Sec-Websocket-Accept") != string(nonceAccept) {
+		cli.Close()
+		return errors.New("mismatch challenge/response")
 	}
 	return nil
 }
 
-func (cli *Client) WriteFrame(opcode byte, data []byte) error {
-	bw := bufio.NewWriter(cli.Conn)
-	bw.WriteByte(0x80 | opcode) // 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
-	if opcode == PingMessage || opcode == PongMessage {
-		bw.WriteByte(0x00) // MASK 0xxx xxxx LENGTH x000 0000
-		return bw.Flush()
-	}
-	var mask byte = 0x80 // MASK 1xxx xxxx
-	var length = len(data)
-	switch {
-	case length < 125:
-		bw.WriteByte(mask | byte(length))
-	case length < 65536:
-		bw.WriteByte(mask | 0b01111110)
-		var extended = make([]byte, 2)
-		binary.BigEndian.PutUint16(extended, uint16(length))
-		bw.Write(extended)
-	default:
-		bw.WriteByte(mask | 0b01111111)
-		var extended = make([]byte, 8)
-		binary.BigEndian.PutUint64(extended, uint64(length))
-		bw.Write(extended)
-	}
-	var maskkey, err = genMaskKey()
-	if err != nil {
-		return err
-	}
-	bw.Write(maskkey)
-	payload := make([]byte, len(data))
-	for i := range data {
-		payload[i] = data[i] ^ maskkey[i%4]
-	}
-	bw.Write(payload)
-	return bw.Flush()
+func (cli *Client) WriteFrame(opcode byte, content []byte) error {
+	return WriteFrame(cli.Conn, opcode, content)
+}
+
+func (cli *Client) ReadFrame() (byte, []byte, error) {
+	return ReadFrame(cli.Conn)
 }
 
 func (cli *Client) Close() error {
+	if cli.Conn == nil {
+		return nil
+	}
 	cli.WriteFrame(CloseMessage, []byte{0x03, 0xe8})
 	return cli.Conn.Close()
 }

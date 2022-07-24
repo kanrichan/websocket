@@ -2,12 +2,11 @@ package main
 
 import (
 	"crypto/tls"
-	"fmt"
 	"testing"
 )
 
 func TestClient(t *testing.T) {
-	ws, err := NewClient("wss://127.0.0.1:8000/ws")
+	ws, err := NewClient("ws://127.0.0.1:8080/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,6 +16,11 @@ func TestClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ws.Close()
-	fmt.Println(ws.Response)
+	t.Log(ws.Response)
 	ws.WriteFrame(TextMessage, []byte("hello world!"))
+	opcode, content, err := ws.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(opcode, string(content))
 }
