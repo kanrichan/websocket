@@ -50,6 +50,23 @@ func genNonceAccept(nonce string) (string, error) {
 	return string(expected), nil
 }
 
+func readByte(rd io.Reader) (byte, error) {
+	var b = make([]byte, 1)
+	n, err := rd.Read(b)
+	if n != 1 {
+		return 0, errors.New("???")
+	}
+	return b[0], err
+}
+
+func readBytes(rd io.Reader, p []byte) error {
+	n, err := rd.Read(p)
+	if n != len(p) {
+		return errors.New("???")
+	}
+	return err
+}
+
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-------+-+-------------+-------------------------------+
@@ -68,7 +85,7 @@ func genNonceAccept(nonce string) (string, error) {
 // + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
 // |                     Payload Data continued ...                |
 // +---------------------------------------------------------------+
-func WriteFrame(conn net.Conn, opcode byte, content []byte) error {
+func writeFrame(conn net.Conn, opcode byte, content []byte) error {
 	bw := bufio.NewWriter(conn)
 	bw.WriteByte(0x80 | opcode) // 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
 	if opcode == PingMessage || opcode == PongMessage {
@@ -107,24 +124,7 @@ func WriteFrame(conn net.Conn, opcode byte, content []byte) error {
 	return bw.Flush()
 }
 
-func readByte(rd io.Reader) (byte, error) {
-	var b = make([]byte, 1)
-	n, err := rd.Read(b)
-	if n != 1 {
-		return 0, errors.New("???")
-	}
-	return b[0], err
-}
-
-func readBytes(rd io.Reader, p []byte) error {
-	n, err := rd.Read(p)
-	if n != len(p) {
-		return errors.New("???")
-	}
-	return err
-}
-
-func ReadFrame(conn net.Conn) (byte, []byte, error) {
+func readFrame(conn net.Conn) (byte, []byte, error) {
 	b0, err := readByte(conn)
 	// FIN 1 RSV1 0 RSV2 0 RSV3 0
 	if b0&0xf0 != 0x80 {

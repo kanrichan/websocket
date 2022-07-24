@@ -98,11 +98,11 @@ func (cli *Client) Connect() error {
 }
 
 func (cli *Client) WriteFrame(opcode byte, content []byte) error {
-	return WriteFrame(cli.Conn, opcode, content)
+	return writeFrame(cli.Conn, opcode, content)
 }
 
 func (cli *Client) ReadFrame() (byte, []byte, error) {
-	return ReadFrame(cli.Conn)
+	return readFrame(cli.Conn)
 }
 
 func (cli *Client) Close() error {
