@@ -16,6 +16,11 @@ var (
 )
 
 var (
+	ErrShortBuffer      = errors.New("short buffer")
+	ErrNotSupportFinRsv = errors.New("not support fin or rsv")
+)
+
+var (
 	TextMessage   byte = 0x01
 	BinaryMessage byte = 0x02
 	CloseMessage  byte = 0x08
@@ -25,7 +30,11 @@ var (
 
 func genNonce() (string, error) {
 	p := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, p); err != nil {
+	n, err := rand.Reader.Read(p)
+	if n != 16 {
+		return "", ErrShortBuffer
+	}
+	if err != nil {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(p), nil
@@ -54,7 +63,7 @@ func readByte(rd io.Reader) (byte, error) {
 	var b = make([]byte, 1)
 	n, err := rd.Read(b)
 	if n != 1 {
-		return 0, errors.New("???")
+		return 0, ErrShortBuffer
 	}
 	return b[0], err
 }
@@ -62,7 +71,7 @@ func readByte(rd io.Reader) (byte, error) {
 func readBytes(rd io.Reader, p []byte) error {
 	n, err := rd.Read(p)
 	if n != len(p) {
-		return errors.New("???")
+		return ErrShortBuffer
 	}
 	return err
 }
@@ -85,55 +94,113 @@ func readBytes(rd io.Reader, p []byte) error {
 // + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
 // |                     Payload Data continued ...                |
 // +---------------------------------------------------------------+
-func writeFrame(conn net.Conn, opcode byte, content []byte) error {
+
+type Frame struct {
+	FINRSV     byte
+	OpCode     byte
+	Mask       byte
+	Length     int
+	MaskingKey []byte
+	Payload    []byte
+}
+
+func defaultFrame(opcode byte, payload []byte) *Frame {
+	var mask byte
+	key, err := genMaskKey()
+	if err == nil {
+		mask = 0x80
+	}
+	return &Frame{
+		FINRSV:     0x80,
+		OpCode:     opcode,
+		Mask:       mask,
+		Length:     len(payload),
+		MaskingKey: key,
+		Payload:    payload,
+	}
+}
+
+func writeFrame(conn net.Conn, frame *Frame) error {
 	bw := bufio.NewWriter(conn)
-	bw.WriteByte(0x80 | opcode) // 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
-	if opcode == PingMessage || opcode == PongMessage {
+	// 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
+	if frame.FINRSV != 0x80 {
+		frame.FINRSV = 0x80
+	}
+	if frame.Length != len(frame.Payload) {
+		frame.Length = len(frame.Payload)
+	}
+	bw.WriteByte(frame.FINRSV | frame.OpCode)
+	if frame.OpCode == PingMessage || frame.OpCode == PongMessage {
 		bw.WriteByte(0x00) // MASK 0xxx xxxx LENGTH x000 0000
 		return bw.Flush()
 	}
-	var mask byte = 0x00 // MASK 0xxx xxxx
-	var maskKey, err = genMaskKey()
-	var payload = make([]byte, len(content))
-	if err == nil {
-		mask = 0x80 // MASK 1xxx xxxx
-		for i := range content {
-			payload[i] = content[i] ^ maskKey[i%4]
-		}
-	}
 	switch {
-	case len(content) < 125:
-		bw.WriteByte(mask | byte(len(content)))
-	case len(content) < 65536:
-		bw.WriteByte(mask | 0b01111110)
+	case frame.Length < 125:
+		bw.WriteByte(frame.Mask | byte(frame.Length))
+	case frame.Length < 65536:
+		bw.WriteByte(frame.Mask | 0b01111110)
 		var extended = make([]byte, 2)
-		binary.BigEndian.PutUint16(extended, uint16(len(content)))
+		binary.BigEndian.PutUint16(extended, uint16(frame.Length))
 		bw.Write(extended)
 	default:
-		bw.WriteByte(mask | 0b01111111)
+		bw.WriteByte(frame.Mask | 0b01111111)
 		var extended = make([]byte, 8)
-		binary.BigEndian.PutUint64(extended, uint64(len(content)))
+		binary.BigEndian.PutUint64(extended, uint64(frame.Length))
 		bw.Write(extended)
 	}
-	if mask == 0x00 {
-		bw.Write(content)
-	} else {
-		bw.Write(maskKey)
-		bw.Write(payload)
+	if frame.Mask != 0x80 {
+		bw.Write(frame.Payload)
+		return bw.Flush()
 	}
+	var temp = make([]byte, frame.Length)
+	for i := range frame.Payload {
+		temp[i] = frame.Payload[i] ^ frame.MaskingKey[i%4]
+	}
+	bw.Write(frame.MaskingKey)
+	bw.Write(temp)
 	return bw.Flush()
 }
 
-func readFrame(conn net.Conn) (byte, []byte, error) {
-	b0, err := readByte(conn)
-	// FIN 1 RSV1 0 RSV2 0 RSV3 0
-	if b0&0xf0 != 0x80 {
-		return 0, nil, errors.New("?????")
+type Conn struct {
+	net.Conn
+}
+
+func (conn *Conn) ReadByte() (byte, error) {
+	var p = make([]byte, 1)
+	n, err := conn.Read(p)
+	if n != 1 {
+		return 0, ErrShortBuffer
 	}
-	var opcode = b0 & 0x0f
+	if err != nil {
+		return 0, err
+	}
+	return p[0], nil
+}
+
+func (conn *Conn) WriteByte(p byte) error {
+	n, err := conn.Write(p)
+	if n != 1 {
+		return ErrShortBuffer
+	}
+	if err != nil {
+		return err
+	}
+	return b[0], nil
+}
+
+func readFrame(conn net.Conn) (*Frame, error) {
+	var frame = &Frame{}
+	b0, err := readByte(conn)
+	frame.FINRSV = b0 & 0xf0
+	frame.OpCode = b0 & 0x0f
+	// FIN 1 RSV1 0 RSV2 0 RSV3 0
+	if frame.FINRSV != 0x80 {
+		return nil, ErrNotSupportFinRsv
+	}
+
 	b1, err := readByte(conn)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	var mask = b1 & 0x80
 	var length int

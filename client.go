@@ -24,6 +24,7 @@ type Client struct {
 }
 
 func NewClient(url string) (*Client, error) {
+	var x = make(chan ClientChan)
 	u, err := urlpkg.Parse(url)
 	if err != nil {
 		return nil, err
