@@ -24,7 +24,6 @@ type Client struct {
 }
 
 func NewClient(url string) (*Client, error) {
-	var x = make(chan ClientChan)
 	u, err := urlpkg.Parse(url)
 	if err != nil {
 		return nil, err
@@ -99,11 +98,11 @@ func (cli *Client) Connect() error {
 }
 
 func (cli *Client) WriteFrame(opcode byte, content []byte) error {
-	return writeFrame(cli.Conn, opcode, content)
+	return nil //writeFrame(cli.Conn, opcode, content)
 }
 
 func (cli *Client) ReadFrame() (byte, []byte, error) {
-	return readFrame(cli.Conn)
+	return 0, nil, nil //readFrame(cli.Conn)
 }
 
 func (cli *Client) Close() error {
