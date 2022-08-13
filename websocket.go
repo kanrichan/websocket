@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -40,9 +39,9 @@ func genNonce() (string, error) {
 	return base64.StdEncoding.EncodeToString(p), nil
 }
 
-func genMaskKey() ([]byte, error) {
-	p := make([]byte, 4)
-	_, err := io.ReadFull(rand.Reader, p)
+func genMaskKey() ([4]byte, error) {
+	var p [4]byte
+	_, err := io.ReadFull(rand.Reader, p[:])
 	return p, err
 }
 
@@ -96,146 +95,180 @@ func readBytes(rd io.Reader, p []byte) error {
 // +---------------------------------------------------------------+
 
 type Frame struct {
-	FINRSV     byte
+	FIN        bool
+	RSV        [3]bool
 	OpCode     byte
-	Mask       byte
 	Length     int
-	MaskingKey []byte
+	Mask       bool
+	MaskingKey [4]byte
 	Payload    []byte
+	NextFrame  *Frame
 }
 
-func defaultFrame(opcode byte, payload []byte) *Frame {
-	var mask byte
+func defaultFrame(opcode byte, payload []byte) (*Frame, error) {
 	key, err := genMaskKey()
 	if err == nil {
-		mask = 0x80
+		return nil, err
 	}
 	return &Frame{
-		FINRSV:     0x80,
+		FIN:        true,
+		RSV:        [3]bool{false, false, false},
 		OpCode:     opcode,
-		Mask:       mask,
+		Mask:       true,
 		Length:     len(payload),
 		MaskingKey: key,
 		Payload:    payload,
-	}
+	}, nil
 }
 
-func writeFrame(conn net.Conn, frame *Frame) error {
-	bw := bufio.NewWriter(conn)
-	// 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
-	if frame.FINRSV != 0x80 {
-		frame.FINRSV = 0x80
+func writeFrame(wr io.Writer, frame *Frame) error {
+	var length = 2
+	var i = 0
+	switch {
+	case frame.Length < 125:
+		length += 0
+	case frame.Length < 65536:
+		length += 2
+	default:
+		length += 8
 	}
-	if frame.Length != len(frame.Payload) {
-		frame.Length = len(frame.Payload)
+	if frame.Mask {
+		length += 4
 	}
-	bw.WriteByte(frame.FINRSV | frame.OpCode)
 	if frame.OpCode == PingMessage || frame.OpCode == PongMessage {
-		bw.WriteByte(0x00) // MASK 0xxx xxxx LENGTH x000 0000
-		return bw.Flush()
+		length += 1
+	} else {
+		length += frame.Length
+	}
+	var buf = make([]byte, length, length)
+	// 0X80 -> FIN 1 RSV1 0 RSV2 0 RSV3 0
+	frame.OpCode &= 0x0f
+	if frame.FIN {
+		buf[i] = 0x80 | frame.OpCode
+	} else {
+		buf[i] = frame.OpCode
+	}
+	if frame.OpCode == PingMessage || frame.OpCode == PongMessage {
+		return nil
+	}
+	i++ // 1
+	if frame.Mask {
+		buf[i] = 0x80
 	}
 	switch {
 	case frame.Length < 125:
-		bw.WriteByte(frame.Mask | byte(frame.Length))
+		buf[i] |= byte(frame.Length)
+		i++
 	case frame.Length < 65536:
-		bw.WriteByte(frame.Mask | 0b01111110)
-		var extended = make([]byte, 2)
-		binary.BigEndian.PutUint16(extended, uint16(frame.Length))
-		bw.Write(extended)
+		buf[i] |= 0b01111110
+		binary.BigEndian.PutUint16(buf[2:4], uint16(frame.Length))
+		i += 3
 	default:
-		bw.WriteByte(frame.Mask | 0b01111111)
-		var extended = make([]byte, 8)
-		binary.BigEndian.PutUint64(extended, uint64(frame.Length))
-		bw.Write(extended)
+		buf[i] |= 0b01111111
+		binary.BigEndian.PutUint16(buf[2:10], uint16(frame.Length))
+		i += 9
 	}
-	if frame.Mask != 0x80 {
-		bw.Write(frame.Payload)
-		return bw.Flush()
+	if frame.Mask {
+		copy(buf[i:i+4], frame.MaskingKey[:])
+		i += 4
 	}
-	var temp = make([]byte, frame.Length)
-	for i := range frame.Payload {
-		temp[i] = frame.Payload[i] ^ frame.MaskingKey[i%4]
+	for j := range frame.Payload {
+		buf[i+j] = frame.Payload[j] ^ frame.MaskingKey[j%4]
 	}
-	bw.Write(frame.MaskingKey)
-	bw.Write(temp)
-	return bw.Flush()
+	n, err := wr.Write(buf)
+	if n != length {
+		return ErrNotSupportFinRsv
+	}
+	if !frame.FIN && frame.NextFrame != nil {
+		err := writeFrame(wr, frame.NextFrame)
+		if err != nil {
+			return err
+		}
+	}
+	return err
 }
 
 type Conn struct {
 	net.Conn
 }
 
-func (conn *Conn) ReadByte() (byte, error) {
-	var p = make([]byte, 1)
-	n, err := conn.Read(p)
-	if n != 1 {
-		return 0, ErrShortBuffer
-	}
-	if err != nil {
-		return 0, err
-	}
-	return p[0], nil
-}
-
-func (conn *Conn) WriteByte(p byte) error {
-	n, err := conn.Write(p)
-	if n != 1 {
-		return ErrShortBuffer
-	}
-	if err != nil {
-		return err
-	}
-	return b[0], nil
-}
-
-func readFrame(conn net.Conn) (*Frame, error) {
+func readFrame(rd io.Reader) (*Frame, error) {
 	var frame = &Frame{}
-	b0, err := readByte(conn)
-	frame.FINRSV = b0 & 0xf0
-	frame.OpCode = b0 & 0x0f
-	// FIN 1 RSV1 0 RSV2 0 RSV3 0
-	if frame.FINRSV != 0x80 {
-		return nil, ErrNotSupportFinRsv
+	var b0 = make([]byte, 2)
+	n, err := rd.Read(b0)
+	if n != 2 {
+		return frame, ErrShortBuffer
 	}
-
-	b1, err := readByte(conn)
 	if err != nil {
-		return nil, err
+		return frame, err
 	}
-	var mask = b1 & 0x80
-	var length int
+	if b0[0]&0x80 == 0x80 {
+		frame.FIN = true
+	}
+	if b0[0]&0x40 == 0x40 {
+		frame.RSV[0] = true
+	}
+	if b0[0]&0x20 == 0x20 {
+		frame.RSV[1] = true
+	}
+	if b0[0]&0x10 == 0x10 {
+		frame.RSV[2] = true
+	}
+	frame.OpCode = b0[0] & 0x0f
+	if b0[1]&0x80 == 0x80 {
+		frame.Mask = true
+	}
+	if frame.OpCode == PingMessage || frame.OpCode == PongMessage {
+		var t = make([]byte, 1)
+		n, err := rd.Read(t)
+		if n != 2 {
+			return frame, ErrShortBuffer
+		}
+		if err != nil {
+			return frame, nil
+		}
+		return frame, nil
+	}
 	switch {
-	case b1&0x7f <= 0b01111101:
-		length = int(b1 & 0x7f)
-	case b1&0x7f == 0b01111110:
+	case b0[1]&0x7f <= 0b01111101:
+		frame.Length = int(b0[1] & 0x7f)
+	case b0[1]&0x7f == 0b01111110:
 		var t = make([]byte, 2)
-		if err = readBytes(conn, t); err != nil {
-			return 0, nil, err
+		n, err := rd.Read(t)
+		if n != 2 {
+			return frame, ErrShortBuffer
 		}
-		length = int(binary.BigEndian.Uint16(t))
-	case b1&0x7f == 0b01111111:
+		if err != nil {
+			return frame, nil
+		}
+		frame.Length = int(binary.BigEndian.Uint16(t))
+	case b0[1]&0x7f == 0b01111111:
 		var t = make([]byte, 8)
-		if err = readBytes(conn, t); err != nil {
-			return 0, nil, err
+		n, err := rd.Read(t)
+		if n != 2 {
+			return frame, ErrShortBuffer
 		}
-		length = int(binary.BigEndian.Uint64(t))
+		if err != nil {
+			return frame, err
+		}
+		frame.Length = int(binary.BigEndian.Uint64(t))
 	}
-	var maskKey = make([]byte, 4)
-	if mask == 0x80 {
-		if err = readBytes(conn, maskKey); err != nil {
-			return 0, nil, err
+	var length = frame.Length
+	if frame.Mask {
+		length += 4
+	}
+	var b1 = make([]byte, length)
+	if frame.Mask {
+		copy(frame.MaskingKey[:], b1[0:4])
+		frame.Payload = b1[4:]
+	} else {
+		frame.Payload = b1
+	}
+	if !frame.FIN {
+		frame.NextFrame, err = readFrame(rd)
+		if err != nil {
+			return frame, err
 		}
 	}
-	var payload = make([]byte, length)
-	if err = readBytes(conn, payload); err != nil {
-		return 0, nil, err
-	}
-	if mask != 0x80 {
-		return opcode, payload, nil
-	}
-	var content = make([]byte, length)
-	for i := range payload {
-		content[i] = payload[i] ^ maskKey[i%4]
-	}
-	return opcode, content, nil
+	return frame, nil
 }
