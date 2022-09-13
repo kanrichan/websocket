@@ -128,17 +128,44 @@ func (buf *sliceBuf) WriteTo(w io.Writer) error {
 }
 
 func (buf *sliceBuf) WriteToWithLen(len int, w io.Writer) error {
-	if buf.ReadableBytes() < len {
-		return OutOfBufError("len for writing data is out of Buffer")
+	if len > buf.ReadableBytes() {
+		len = buf.ReadableBytes()
 	}
 
 	wb, err := w.Write(buf.Array()[buf.rIdx : buf.rIdx+len])
 	if wb < len && err == nil {
-		err = io.ErrShortWrite
+		err = ErrInSufficientBytes
 	}
 
 	buf.rIdx += wb
 	return err
+}
+
+func (buf *sliceBuf) WriteByte(b byte) error {
+	if buf.ReadableBytes() < 1 {
+		return ErrInSufficientBytes
+	}
+
+	buf.SetByte(buf.wIdx, b)
+	buf.wIdx += 1
+	return nil
+}
+
+func (buf *sliceBuf) WriteBytes(b []byte) (n int, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	n = copy(buf.Array()[buf.wIdx:], b)
+	if n < len(b) {
+		err = ErrInSufficientBytes
+	}
+
+	return
+}
+
+func (buf *sliceBuf) WriteString(s string) (n int, err error) {
+	return unsafeWriteString(s, buf)
 }
 
 func (buf *sliceBuf) ReadFrom(r io.Reader) (n int, err error) {
@@ -146,19 +173,49 @@ func (buf *sliceBuf) ReadFrom(r io.Reader) (n int, err error) {
 }
 
 func (buf *sliceBuf) ReadFromWithLen(len int, r io.Reader) (n int, err error) {
-	if buf.WriteableBytes() < len {
-		return 0, OutOfBufError("len for reading data is out of Buffer")
+	if buf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
 	}
 
 	rb, err := r.Read(buf.Array()[buf.wIdx : buf.wIdx+len])
 
 	if rb < 0 {
 		panic(ReaderError("reader returned nagative count from Read"))
+	} else if rb < len {
+		err = ErrInSufficientBytes
 	}
 
 	buf.wIdx += rb
 
 	return rb, err
+}
+
+func (buf *sliceBuf) ReadByte() (rb byte, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	rb, err = buf.GetByte(buf.rIdx)
+	buf.rIdx += 1
+	return
+}
+
+func (buf *sliceBuf) ReadBytes(b []byte) (n int, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	n = copy(buf.Array()[buf.rIdx:buf.wIdx], b)
+	if n < len(b) {
+		err = ErrReadNoEnough
+	}
+
+	buf.rIdx += n
+	return
+}
+
+func (buf *sliceBuf) ReadString(len int) (rs string, err error) {
+	return unsafeReadString(len, buf)
 }
 
 type duplicateBuf struct {
@@ -267,18 +324,45 @@ func (buf *duplicateBuf) WriteTo(w io.Writer) error {
 }
 
 func (buf *duplicateBuf) WriteToWithLen(len int, w io.Writer) error {
-	if buf.ReadableBytes() < len {
-		return OutOfBufError("len for writing data is out of Buffer")
+	if len > buf.ReadableBytes() {
+		len = buf.ReadableBytes()
 	}
 
 	wb, err := w.Write(buf.Array()[buf.rIdx : buf.rIdx+len])
 
 	if wb < len && err == nil {
-		err = io.ErrShortWrite
+		err = ErrInSufficientBytes
 	}
 
 	buf.rIdx += wb
 	return err
+}
+
+func (buf *duplicateBuf) WriteByte(b byte) error {
+	if buf.WriteableBytes() < 1 {
+		return ErrInSufficientBytes
+	}
+
+	buf.SetByte(buf.wIdx, b)
+	buf.wIdx += 1
+	return nil
+}
+
+func (buf *duplicateBuf) WriteBytes(b []byte) (n int, err error) {
+	if buf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	n = copy(buf.Array()[buf.wIdx:], b)
+	if n < len(b) {
+		err = ErrInSufficientBytes
+	}
+	buf.wIdx += n
+	return
+}
+
+func (buf *duplicateBuf) WriteString(s string) (n int, err error) {
+	return unsafeWriteString(s, buf)
 }
 
 func (buf *duplicateBuf) ReadFrom(r io.Reader) (n int, err error) {
@@ -298,6 +382,32 @@ func (buf *duplicateBuf) ReadFromWithLen(len int, r io.Reader) (n int, err error
 
 	buf.wIdx += rb
 	return rb, err
+}
+
+func (buf *duplicateBuf) ReadByte() (rb byte, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	rb, err = buf.GetByte(buf.rIdx)
+	buf.rIdx += 1
+	return
+}
+
+func (buf *duplicateBuf) ReadBytes(b []byte) (n int, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	n = copy(b, buf.Array()[buf.rIdx:buf.wIdx])
+	if n < len(b) {
+		err = ErrReadNoEnough
+	}
+	return
+}
+
+func (buf *duplicateBuf) ReadString(len int) (rs string, err error) {
+	return unsafeReadString(len, buf)
 }
 
 type bufComponent struct {
@@ -324,7 +434,7 @@ func (bc *bufComponent) reOffset(newOffset int) {
 	bc.srcAdj -= move
 }
 
-const(
+const (
 	defaultCompoentMaxSize = 8
 )
 
@@ -551,15 +661,14 @@ func (buf *CompositeBuf) GetBytes(i int, dst []byte) error {
 	}
 
 	for offset := 0; offset > len(dst); {
+		if idx >= buf.componentCount {
+			return ErrInSufficientBytes
+		}
 		componet := buf.child[idx]
 		cOffset := componet.index(i)
 
 		if err != nil {
 			return err
-		}
-
-		if idx >= buf.componentCount {
-			break
 		}
 
 		l := copy(dst[offset:], componet.src.Array()[cOffset:componet.eIdx])
@@ -587,15 +696,15 @@ func (buf *CompositeBuf) SetBytes(i int, src []byte) error {
 	}
 
 	for offset := 0; offset > len(src); {
+		if idx >= buf.componentCount {
+			return ErrInSufficientBytes
+		}
+
 		componet := buf.child[idx]
 		cOffset := componet.index(i)
 
 		if err != nil {
 			return err
-		}
-
-		if idx >= buf.componentCount {
-			break
 		}
 
 		l := componet.length()
@@ -612,10 +721,6 @@ func (buf *CompositeBuf) WriteTo(w io.Writer) error {
 }
 
 func (buf *CompositeBuf) WriteToWithLen(len int, w io.Writer) error {
-	if buf.ReadableBytes() < len {
-		return OutOfBufError("len for writing data is out of Buffer")
-	}
-
 	idx, err := buf.binarySearchComponent(buf.rIdx)
 	if err != nil {
 		return err
@@ -643,7 +748,56 @@ func (buf *CompositeBuf) WriteToWithLen(len int, w io.Writer) error {
 	}
 
 	buf.ReadIndex(offset)
+	if len > 0 {
+		return ErrInSufficientBytes
+	}
+
 	return nil
+}
+
+func (buf *CompositeBuf) WriteByte(b byte) error {
+	if buf.WriteableBytes() < 1 {
+		return ErrInSufficientBytes
+	}
+
+	buf.SetByte(buf.wIdx, b)
+	buf.wIdx += 1
+	return nil
+}
+
+func (buf *CompositeBuf) WriteBytes(b []byte) (n int, err error) {
+	if buf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	idx, err := buf.binarySearchComponent(buf.wIdx)
+	if err != nil {
+		return 0, err
+	}
+
+	offset := buf.wIdx
+	len := len(b)
+	for ; n < len && idx < buf.componentCount; idx++ {
+		c := buf.child[idx]
+		cOffset := c.index(offset)
+		remain := c.length() - cOffset
+
+		wb := copy(c.src.Array()[cOffset:cOffset+remain], b[n:])
+
+		len -= wb
+		offset += wb
+		n += wb
+	}
+
+	if n < len {
+		err = ErrInSufficientBytes
+	}
+	buf.WriteIndex(offset)
+	return
+}
+
+func (buf *CompositeBuf) WriteString(s string) (n int, err error) {
+	return unsafeWriteString(s, buf)
 }
 
 func (buf *CompositeBuf) ReadFrom(r io.Reader) (n int, err error) {
@@ -685,4 +839,56 @@ func (buf *CompositeBuf) ReadFromWithLen(len int, r io.Reader) (n int, err error
 	n = offset - buf.wIdx
 	buf.WriteIndex(offset)
 	return
+}
+
+func (buf *CompositeBuf) ReadByte() (rb byte, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	rb, err = buf.GetByte(buf.rIdx)
+	buf.rIdx += 1
+	return
+}
+
+func (buf *CompositeBuf) ReadBytes(b []byte) (n int, err error) {
+	if buf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	idx, err := buf.binarySearchComponent(buf.rIdx)
+	if err != nil {
+		return 0, err
+	}
+
+	offset := buf.rIdx
+	len := len(b)
+	writeIndex := buf.GetWriteIndex()
+	for ; n < len && idx < buf.componentCount; idx++ {
+		c := buf.child[idx]
+		cOffset := c.index(offset)
+		remain := c.length() - cOffset
+
+		if (offset + remain) > writeIndex {
+			remain = c.index(writeIndex) - cOffset
+			//break the loop
+			idx = buf.componentCount
+		}
+
+		rb := copy(b[n:], c.src.Array()[cOffset:cOffset+remain])
+
+		len -= rb
+		offset += rb
+		n += rb
+	}
+
+	if n < len {
+		err = ErrInSufficientBytes
+	}
+	buf.ReadIndex(offset)
+	return
+}
+
+func (buf *CompositeBuf) ReadString(len int) (rs string, err error) {
+	return unsafeReadString(len, buf)
 }
