@@ -1,10 +1,20 @@
 package util
 
-import "io"
+import (
+	"io"
+	"reflect"
+	"unsafe"
+)
 
 const (
 	defaultBufSize = 2048
 )
+
+type BufferError string
+
+func (e BufferError) Error() string {
+	return "websocket.buf:\n " + string(e)
+}
 
 type OutOfBufError string
 
@@ -17,6 +27,11 @@ type ReaderError string
 func (e ReaderError) Error() string {
 	return "websocket.buf:\n ReaderError: " + string(e)
 }
+
+const(
+	ErrInSufficientBytes = BufferError("insufficient bytes available in the buffer")
+	ErrReadNoEnough = BufferError("length of data read from Buffer is not enough")
+)
 
 type BaseBuf interface {
 	Size() int
@@ -51,9 +66,21 @@ type BaseBuf interface {
 
 	WriteToWithLen(len int, w io.Writer) error
 
+	WriteByte(b byte) error
+
+	WriteBytes(b []byte) (n int, err error)
+
+	WriteString(s string) (n int, err error)
+
 	ReadFrom(r io.Reader) (n int, err error)
 
 	ReadFromWithLen(len int, r io.Reader) (n int, err error)
+
+	ReadByte() (rb byte, err error)
+
+	ReadBytes(b []byte) (n int, err error)
+
+	ReadString(len int) (rs string, err error)
 }
 
 type ByteBuf struct {
@@ -85,6 +112,38 @@ func NewBufWithArray(b []byte) BaseBuf {
 func NewBuf() BaseBuf {
 	return NewBufWithSize(defaultBufSize)
 }
+
+func unsafeWriteString(s string, dstBuf BaseBuf) (n int, err error) {
+	if dstBuf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	bh := reflect.SliceHeader{
+        Data: sh.Data,
+        Len:  sh.Len,
+        Cap:  sh.Len,
+    }
+	b := *(*[]byte)(unsafe.Pointer(&bh))
+
+	n, err = dstBuf.WriteBytes(b)
+	return
+}
+
+func unsafeReadString(len int, srcBuf BaseBuf) (str string, err error) {
+	if srcBuf.ReadableBytes() < 1 {
+		return "", ErrInSufficientBytes
+	} else if srcBuf.ReadableBytes() < len {
+		len = srcBuf.ReadableBytes()
+	}
+
+	rb := make([]byte, len)
+	_, err = srcBuf.ReadBytes(rb)
+	
+	str = *(*string)(unsafe.Pointer(&rb))
+	return
+}
+
 
 func checkIndex(idx int, buf BaseBuf) error {
 	if idx < 0 {
@@ -208,9 +267,10 @@ func (b *ByteBuf) WriteTo(w io.Writer) error {
 	return b.WriteToWithLen(b.ReadableBytes(), w)
 }
 
-func (b *ByteBuf) WriteToWithLen(len int, w io.Writer) error {
-	if b.ReadableBytes() < len {
-		return OutOfBufError("len for writing data is out of Buffer")
+func (b *ByteBuf) WriteToWithLen(len int, w io.Writer) (err error) {
+	if len > b.ReadableBytes() {
+		len = b.ReadableBytes()
+		err = ErrInSufficientBytes
 	}
 
 	wb, err := w.Write(b.array[b.rIdx : b.rIdx + len])
@@ -219,7 +279,36 @@ func (b *ByteBuf) WriteToWithLen(len int, w io.Writer) error {
 	}
 
 	b.rIdx += wb
-	return err
+	return
+}
+
+func (buf *ByteBuf) WriteByte(b byte) error {
+	if buf.WriteableBytes() < 1 {
+		return ErrInSufficientBytes
+	}
+
+	buf.array[buf.wIdx] = b;
+	buf.wIdx += 1
+	return nil
+}
+
+func (buf *ByteBuf) WriteBytes(b []byte) (n int, err error) {
+	if buf.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	wb := copy(buf.array[buf.wIdx:], b)
+	if wb < len(b) {
+		err = ErrInSufficientBytes
+	}
+
+	buf.wIdx += wb
+
+	return wb, err
+}
+
+func (buf *ByteBuf) WriteString(s string) (n int, err error) {
+	return unsafeWriteString(s, buf)
 }
 
 func (b *ByteBuf) ReadFrom(r io.Reader) (n int, err error) {
@@ -227,8 +316,8 @@ func (b *ByteBuf) ReadFrom(r io.Reader) (n int, err error) {
 }
 
 func (b *ByteBuf) ReadFromWithLen(len int, r io.Reader) (n int, err error) {
-	if b.WriteableBytes() < len {
-		return 0, OutOfBufError("len for reading data is out of Buffer")
+	if b.WriteableBytes() < 1 {
+		return 0, ErrInSufficientBytes
 	}
 
 	rb, err := r.Read(b.array[b.wIdx : b.wIdx+len])
@@ -240,4 +329,33 @@ func (b *ByteBuf) ReadFromWithLen(len int, r io.Reader) (n int, err error) {
 	b.wIdx += rb
 
 	return rb, err
+}
+
+func (b *ByteBuf) ReadByte() (rb byte, err error) {
+	if b.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	rb = b.array[b.rIdx]
+	b.rIdx += 1
+	return
+}
+
+func (buf *ByteBuf) ReadBytes(b []byte) (n int, err error) {
+	if buf.ReadableBytes() < 1 {
+		return 0, ErrInSufficientBytes
+	}
+
+	n = copy(b, buf.array[buf.rIdx:buf.wIdx])
+
+	if n < len(b) {
+		err = ErrReadNoEnough
+	}
+
+	buf.rIdx += n
+	return
+}
+
+func (b *ByteBuf) ReadString(len int) (string, error) {
+	return unsafeReadString(len, b)
 }
